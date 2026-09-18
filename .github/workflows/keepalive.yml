@@ -1,0 +1,46 @@
+name: keepalive
+
+on:
+  schedule:
+    # Offset from the top of the hour. GitHub delays cron most often then.
+    - cron: "3/5 * * * *"
+  workflow_dispatch:
+
+# This job only needs the encrypted WAKE_URL secret. No repository contents.
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Send GET
+        env:
+          WAKE_URL: ${{ secrets.WAKE_URL }}
+        run: |
+          if [ -z "${WAKE_URL}" ]; then
+            echo "WAKE_URL is not set"
+            exit 1
+          fi
+          err="$(mktemp)"
+          set +e
+          code="$(curl -4 --silent --output /dev/null --retry 2 --retry-delay 5 --connect-timeout 20 --max-time 120 --write-out '%{http_code}' --stderr "${err}" "${WAKE_URL}")"
+          ec=$?
+          set -e
+          python3 - "${err}" << 'PY'
+          import os, sys
+          secret = os.environ.get("WAKE_URL", "")
+          text = open(sys.argv[1], errors="replace").read()
+          if secret:
+              text = text.replace(secret, "[url]")
+          host = secret.split("://", 1)[-1].split("/")[0]
+          if host:
+              text = text.replace(host, "[host]")
+          print(text, end="")
+          PY
+          rm -f "${err}"
+          echo "curl_exit=${ec}"
+          echo "http_code=${code:-000}"
+          if [ -z "${code}" ] || [ "${code}" = "000" ]; then
+            exit 1
+          fi
