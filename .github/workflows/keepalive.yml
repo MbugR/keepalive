@@ -2,17 +2,17 @@ name: keepalive
 
 on:
   schedule:
-    # Offset from the top of the hour. GitHub delays cron most often then.
+    # GitHub often drops the top of the hour. This form is the documented step syntax.
     - cron: "3/5 * * * *"
   workflow_dispatch:
 
-# This job only needs the encrypted WAKE_URL secret. No repository contents.
+# The job uses repository secrets only. The default token stays unused.
 permissions: {}
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 12
     steps:
       - name: Send GET
         env:
@@ -24,7 +24,7 @@ jobs:
           fi
           err="$(mktemp)"
           set +e
-          code="$(curl -4 --silent --output /dev/null --retry 2 --retry-delay 5 --connect-timeout 20 --max-time 120 --write-out '%{http_code}' --stderr "${err}" "${WAKE_URL}")"
+          code="$(curl -4 --silent --output /dev/null --retry 2 --retry-delay 5 --connect-timeout 20 --max-time 90 --write-out '%{http_code}' --stderr "${err}" "${WAKE_URL}")"
           ec=$?
           set -e
           python3 - "${err}" << 'PY'
@@ -44,3 +44,26 @@ jobs:
           if [ -z "${code}" ] || [ "${code}" = "000" ]; then
             exit 1
           fi
+
+      - name: Queue next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Schedule already repeats, not queueing another run"
+            exit 0
+          fi
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "DISPATCH_TOKEN is not set"
+            exit 1
+          fi
+          sleep 200
+          others="$(gh run list --repo "${{ github.repository }}" --workflow keepalive.yml --limit 20 --json status --jq '[.[] | select(.status=="queued" or .status=="in_progress" or .status=="waiting" or .status=="pending" or .status=="requested")] | length')"
+          echo "active_runs=${others}"
+          if [ "${others}" -gt 1 ]; then
+            echo "Another run is already active"
+            exit 0
+          fi
+          gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref main
+          echo "queued next run"
