@@ -1,0 +1,29 @@
+name: keepalive
+
+on:
+  schedule:
+    # Offset from the top of the hour. GitHub delays cron most often then.
+    - cron: "3-59/5 * * * *"
+  workflow_dispatch:
+
+# This job only needs the encrypted WAKE_URL secret. No repository contents.
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Send GET
+        env:
+          WAKE_URL: ${{ secrets.WAKE_URL }}
+        run: |
+          if [ -z "${WAKE_URL}" ]; then
+            echo "WAKE_URL is not set"
+            exit 1
+          fi
+          code="$(curl --silent --show-error --output /dev/null --retry 2 --retry-delay 5 --connect-timeout 20 --max-time 120 --write-out '%{http_code}' "${WAKE_URL}" || true)"
+          echo "http_code=${code:-000}"
+          if [ -z "${code}" ] || [ "${code}" = "000" ]; then
+            exit 1
+          fi
