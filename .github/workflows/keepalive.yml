@@ -2,11 +2,11 @@ name: keepalive
 
 on:
   schedule:
-    # GitHub often drops the top of the hour. This form is the documented step syntax.
+    # Backup only. The self-dispatch chain is the real wake.
     - cron: "3/5 * * * *"
   workflow_dispatch:
 
-# The job uses repository secrets only. The default token stays unused.
+# Repository secrets only. The default token stays unused.
 permissions: {}
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
           fi
           err="$(mktemp)"
           set +e
-          code="$(curl -4 --silent --output /dev/null --retry 2 --retry-delay 5 --connect-timeout 20 --max-time 90 --write-out '%{http_code}' --stderr "${err}" "${WAKE_URL}")"
+          code="$(curl -4 --silent --output /dev/null --retry 3 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 90 --write-out '%{http_code}' --stderr "${err}" "${WAKE_URL}")"
           ec=$?
           set -e
           python3 - "${err}" << 'PY'
@@ -49,20 +49,18 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          THIS_RUN: ${{ github.run_id }}
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "Schedule already repeats, not queueing another run"
-            exit 0
-          fi
           if [ -z "${GH_TOKEN}" ]; then
             echo "DISPATCH_TOKEN is not set"
             exit 1
           fi
+          # Keep the chain alive even when GET fails or a cron run overlaps.
           sleep 200
-          others="$(gh run list --repo "${{ github.repository }}" --workflow keepalive.yml --limit 20 --json status --jq '[.[] | select(.status=="queued" or .status=="in_progress" or .status=="waiting" or .status=="pending" or .status=="requested")] | length')"
-          echo "active_runs=${others}"
-          if [ "${others}" -gt 1 ]; then
-            echo "Another run is already active"
+          queued="$(gh run list --repo "${{ github.repository }}" --workflow keepalive.yml --limit 30 --json databaseId,status | THIS_RUN="${THIS_RUN}" python3 -c 'import json,os,sys; runs=json.load(sys.stdin); self=int(os.environ["THIS_RUN"]); print(sum(1 for r in runs if r["databaseId"]!=self and r["status"] in ("queued","waiting","pending","requested")))')"
+          echo "queued_others=${queued}"
+          if [ "${queued}" -gt 0 ]; then
+            echo "A follow-up is already queued"
             exit 0
           fi
           gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref main
