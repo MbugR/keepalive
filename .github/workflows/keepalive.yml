@@ -52,7 +52,8 @@ jobs:
           fi
 
       - name: Queue next run
-        if: always()
+        # Runs after a failed GET too, but a cancelled run stops the chain.
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           THIS_RUN: ${{ github.run_id }}
