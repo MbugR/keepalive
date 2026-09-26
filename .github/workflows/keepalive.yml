@@ -67,7 +67,7 @@ jobs:
             exit 0
           fi
           for attempt in 1 2 3; do
-            if gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"; then
+            if gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref "${GITHUB_REF_NAME}"; then
               echo "queued next run"
               exit 0
             fi
