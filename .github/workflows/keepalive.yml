@@ -6,8 +6,14 @@ on:
     - cron: "3/5 * * * *"
   workflow_dispatch:
 
-# Repository secrets only. The default token stays unused.
-permissions: {}
+# One chain at most. A new run waits for the running one; an older waiting run is cancelled.
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+# The built-in token may start the next run: workflow_dispatch is the one event it is allowed to trigger.
+permissions:
+  actions: write
 
 jobs:
   ping:
@@ -48,20 +54,24 @@ jobs:
       - name: Queue next run
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           THIS_RUN: ${{ github.run_id }}
         run: |
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "DISPATCH_TOKEN is not set"
-            exit 1
-          fi
-          # Keep the chain alive even when GET fails or a cron run overlaps.
+          # Keep the chain alive even when GET fails.
           sleep 200
-          queued="$(gh run list --repo "${{ github.repository }}" --workflow keepalive.yml --limit 30 --json databaseId,status | THIS_RUN="${THIS_RUN}" python3 -c 'import json,os,sys; runs=json.load(sys.stdin); self=int(os.environ["THIS_RUN"]); print(sum(1 for r in runs if r["databaseId"]!=self and r["status"] in ("queued","waiting","pending","requested")))')"
+          # Only saves a cancelled run: concurrency already keeps one chain. A failed check must not stop the chain.
+          queued="$(gh run list --repo "${{ github.repository }}" --workflow keepalive.yml --limit 30 --json databaseId,status | THIS_RUN="${THIS_RUN}" python3 -c 'import json,os,sys; runs=json.load(sys.stdin); self=int(os.environ["THIS_RUN"]); print(sum(1 for r in runs if r["databaseId"]!=self and r["status"] in ("queued","waiting","pending","requested")))')" || queued=0
           echo "queued_others=${queued}"
           if [ "${queued}" -gt 0 ]; then
             echo "A follow-up is already queued"
             exit 0
           fi
-          gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref main
-          echo "queued next run"
+          for attempt in 1 2 3; do
+            if gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"; then
+              echo "queued next run"
+              exit 0
+            fi
+            echo "dispatch attempt ${attempt} failed"
+            sleep 10
+          done
+          exit 1
