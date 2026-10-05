@@ -2,11 +2,12 @@ name: keepalive
 
 on:
   schedule:
-    # Backup only. The self-dispatch chain is the real wake.
+    # Weak backup only. GitHub starts it a few times a day (37 times in the week to 2026-10-05), so a
+    # stopped chain can stay down for hours; start it by hand instead of waiting for this.
     - cron: "3/5 * * * *"
   workflow_dispatch:
 
-# One chain at most. A new run waits for the running one; an older waiting run is cancelled.
+# One run at a time. A new run waits as "pending" until the running one ends; a newer pending run replaces an older one.
 concurrency:
   group: keepalive
   cancel-in-progress: false
@@ -18,9 +19,30 @@ permissions:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Worst case with every retry spent is about 16 minutes (gh timeouts, curl retries, the wait).
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
+      # First, so the chain survives if this run dies later. On 2026-10-05 the wait got SIGTERM (exit
+      # code 143) before the next run was queued, and the chain stopped. The queued run stays pending
+      # until this one ends, so it does not start early. Always on main: a run started by hand from
+      # another branch hands the chain back to main, and deleting that branch cannot stop it.
+      # timeout: gh has no request timeout of its own, and a hung call would hold up the GET.
+      - name: Queue next run
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 30 gh workflow run keepalive.yml --repo "${GITHUB_REPOSITORY}" --ref main; then
+              echo "queued next run"
+              exit 0
+            fi
+            echo "dispatch attempt ${attempt} failed"
+            sleep 5
+          done
+          echo "::warning::Could not queue the next run; the last step tries again"
+
       - name: Send GET
+        if: ${{ !cancelled() }}
         env:
           WAKE_URL: ${{ secrets.WAKE_URL }}
         run: |
@@ -51,28 +73,31 @@ jobs:
             exit 1
           fi
 
-      - name: Queue next run
-        # Runs after a failed GET too, but a cancelled run stops the chain.
+      # Spaces the runs: the queued run starts as soon as this one ends. Runs after a failed GET too,
+      # so failures do not turn into a tight loop.
+      - name: Wait
+        if: ${{ !cancelled() }}
+        run: sleep 200
+
+      # Second chance if the first step could not queue the next run (a GitHub API error, say).
+      - name: Make sure the next run is queued
         if: ${{ !cancelled() }}
         env:
-          GH_TOKEN: ${{ github.token }}
           THIS_RUN: ${{ github.run_id }}
         run: |
-          # Keep the chain alive even when GET fails.
-          sleep 200
-          # Only saves a cancelled run: concurrency already keeps one chain. A failed check must not stop the chain.
-          queued="$(gh run list --repo "${{ github.repository }}" --workflow keepalive.yml --limit 30 --json databaseId,status | THIS_RUN="${THIS_RUN}" python3 -c 'import json,os,sys; runs=json.load(sys.stdin); self=int(os.environ["THIS_RUN"]); print(sum(1 for r in runs if r["databaseId"]!=self and r["status"] in ("queued","waiting","pending","requested")))')" || queued=0
+          # A failed check counts as "nothing queued": an extra dispatch only replaces the pending run.
+          queued="$(timeout 30 gh run list --repo "${GITHUB_REPOSITORY}" --workflow keepalive.yml --limit 30 --json databaseId,status | python3 -c 'import json,os,sys; runs=json.load(sys.stdin); me=int(os.environ["THIS_RUN"]); print(sum(1 for r in runs if r["databaseId"]!=me and r["status"] in ("queued","waiting","pending","requested")))')" || queued=0
           echo "queued_others=${queued}"
           if [ "${queued}" -gt 0 ]; then
-            echo "A follow-up is already queued"
+            echo "The next run is queued"
             exit 0
           fi
-          for attempt in 1 2 3; do
-            if gh workflow run keepalive.yml --repo "${{ github.repository }}" --ref "${GITHUB_REF_NAME}"; then
+          for attempt in 1 2 3 4 5; do
+            if timeout 30 gh workflow run keepalive.yml --repo "${GITHUB_REPOSITORY}" --ref main; then
               echo "queued next run"
               exit 0
             fi
             echo "dispatch attempt ${attempt} failed"
-            sleep 10
+            sleep 15
           done
           exit 1
